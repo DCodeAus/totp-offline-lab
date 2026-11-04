@@ -1,12 +1,20 @@
-// Checks totp.js against the official RFC 6238 test values.
+// Checks totp.js against the official RFC 6238 (TOTP) and RFC 4226 (HOTP) test values.
 // Run it from this folder with:  node test.mjs   (needs Node.js 20 or newer)
 // Every line should say PASS. If any says FAIL, don't publish the page.
-import { rfcSelfTest, base32Encode, base32Decode, randomSecret, counterBytes, toHex } from "./totp.js";
+import { rfcSelfTest, hotp, RFC4226_HOTP, RFC6238_SEED, base32Encode, base32Decode, randomSecret, counterBytes, toHex } from "./totp.js";
 
 let ok = true;
 for (const r of await rfcSelfTest()) {
   console.log(`${r.pass ? "PASS" : "FAIL"}  time ${String(r.time).padStart(11)}  expected ${r.expected}  got ${r.got}`);
   ok &&= r.pass;
+}
+
+// HOTP: RFC 4226 counters 0 to 9
+const seed = new TextEncoder().encode(RFC6238_SEED);
+for (let c = 0; c < RFC4226_HOTP.length; c++) {
+  const got = (await hotp(seed, c)).code, pass = got === RFC4226_HOTP[c];
+  console.log(`${pass ? "PASS" : "FAIL"}  HOTP counter ${c}  expected ${RFC4226_HOTP[c]}  got ${got}`);
+  ok &&= pass;
 }
 
 // Base32 should round-trip, and bad characters should be rejected

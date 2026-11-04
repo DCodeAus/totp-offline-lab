@@ -5,12 +5,16 @@
 //   2. PARTS holds the text for each clickable part of the 3D model.
 //   3. The live codes, the five-step working, the RFC check and the QR
 //      text are plain web page code and work even if 3D fails to load.
-//   4. init3D() builds the phone, server, clock and keys with three.js.
+//   4. Extra demos, each in its own block below: scan with your real app
+//      (QR code), log in to the demo server (replay and guessing),
+//      HOTP vs TOTP, and the phishing walkthrough.
+//   5. init3D() builds the phone, server, clock and keys with three.js.
 // Security: demo secrets come from crypto.getRandomValues and live only
 // in memory. Text is only written with textContent (no innerHTML, no
 // eval). Nothing is stored and nothing is sent anywhere.
 // ===================================================================
 import * as T from "./totp.js";
+import qrcode from "./vendor/qrcode.mjs"; // qrcode-generator 2.0.4, copied in unchanged
 
 const THREE_URL = document.querySelector('meta[name="three-src"]')?.content || "./vendor/three.module.min.js";
 const $ = (id) => document.getElementById(id);
@@ -27,7 +31,7 @@ const PART_ORDER = ["secret", "clock", "phone", "server", "gap"];
 
 const state = {
   secret: T.randomSecret(), skew: 0, paused: false, pausedAt: 0,
-  phone: null, server: null, verdict: { ok: true, text: "Accepted" }, selected: "secret",
+  phone: null, server: null, serverCounter: 0, verdict: { ok: true, text: "Accepted" }, selected: "secret",
   gen: 0, lastKey: "", noCrypto: !(globalThis.crypto && globalThis.crypto.subtle),
 };
 const nowSec = () => (state.paused ? state.pausedAt : Date.now() / 1000);
@@ -65,7 +69,41 @@ function renderSecret() {
   const b32 = T.base32Encode(state.secret);
   $("p-b32").textContent = b32.match(/.{1,4}/g).join(" ");
   $("p-key").textContent = bytesSpaced(state.secret);
-  $("uri").textContent = `otpauth://totp/Offline%20Code%20Lab:learner?secret=${b32}&issuer=Offline%20Code%20Lab&algorithm=SHA1&digits=6&period=30`;
+  const uri = `otpauth://totp/Offline%20Code%20Lab:learner?secret=${b32}&issuer=Offline%20Code%20Lab&algorithm=SHA1&digits=6&period=30`;
+  $("uri").textContent = uri;
+  drawQr(uri);
+}
+
+// ---------- Try it with your real app: draw the setup QR code ----------
+// The library only works out which squares are dark. We paint them on a
+// canvas ourselves, so no HTML is ever built from strings.
+function drawQr(text) {
+  const canvas = $("qr");
+  try {
+    const qr = qrcode(0, "M"); // 0 = pick the smallest size that fits, M = medium error correction
+    qr.addData(text);
+    qr.make();
+    const n = qr.getModuleCount(), quiet = 4, scale = 6, size = (n + quiet * 2) * scale;
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, size, size); // scanners need dark squares on white, in any theme
+    ctx.fillStyle = "#000000";
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+      if (qr.isDark(r, c)) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
+    }
+  } catch (err) {
+    canvas.hidden = true;
+  }
+}
+
+// ---------- Clock slider: explain why a given offset works or not ----------
+function explainSkew() {
+  const a = Math.abs(state.skew);
+  $("skew-why").textContent =
+    a === 0 ? "Both clocks agree, so the phone shows the server's current code." :
+    a <= 30 ? "Up to 30 seconds off always works. The phone is never more than one step from the server, and the server checks one step either side." :
+    a < 60 ? "Between 30 and 60 seconds off works only part of the time, depending on where you are in the 30 seconds. Watch the verdict change as the steps tick over." :
+    "60 seconds or more is always rejected, because the phone is at least two steps away. The fix is to let the phone set its time automatically.";
 }
 
 function renderPipeline(r, t) {
@@ -102,6 +140,8 @@ async function recompute(force) {
   if (gen !== state.gen) return; // a newer calculation has started; drop this one
   state.phone = phone;
   state.server = { prev: window3[0].code, now: window3[1].code, next: window3[2].code };
+  state.serverCounter = cS;
+  $("try-code").textContent = group3(state.server.now);
   const hit = [-1, 0, 1].find((d, i) => window3[i].code === phone.code);
   if (hit === 0) state.verdict = { ok: true, text: "Accepted" };
   else if (hit === -1) state.verdict = { ok: true, text: "Accepted · phone one step behind" };
@@ -114,6 +154,7 @@ async function recompute(force) {
   v.className = "pill " + (state.verdict.ok ? "ok" : "bad");
   renderPipeline(phone, t);
   for (const id of ["c-phone", "p-code"]) { const n = $(id); n.classList.remove("flash"); void n.offsetWidth; n.classList.add("flash"); }
+  renderPhish();
   hooks.onCodes();
 }
 
@@ -135,6 +176,7 @@ function tickUi() {
 $("skew").addEventListener("input", (e) => {
   state.skew = Number(e.target.value);
   $("skew-out").textContent = `${state.skew > 0 ? "+" : ""}${state.skew} s`;
+  explainSkew();
   recompute(true);
 });
 $("pause").addEventListener("change", (e) => {
@@ -167,6 +209,221 @@ if (state.noCrypto) {
 }
 runRfc();
 requestAnimationFrame(tickUi);
+
+// ---------- Log in to the demo server: replay protection and rate limits ----------
+// The server accepts the previous, current or next 30-second step, refuses
+// a step that's already been used, and locks after too many wrong codes.
+// The lock uses the real clock, so pausing the demo clock doesn't lift it.
+const LOCK_AFTER = 5, LOCK_SECONDS = 60;
+const login = { fails: 0, lockedUntil: 0, lastUsedStep: -Infinity };
+const realNow = () => Date.now() / 1000;
+
+function serverCheck(code) {
+  if (!state.server) return { ok: false, text: "The demo server isn't ready yet" };
+  const limit = $("rl").checked, now = realNow();
+  if (limit && now < login.lockedUntil) {
+    return { ok: false, locked: true, text: `Locked · too many wrong codes, try again in ${Math.ceil(login.lockedUntil - now)} s` };
+  }
+  const steps = [["previous", -1, state.server.prev], ["current", 0, state.server.now], ["next", 1, state.server.next]];
+  const match = steps.find((x) => x[2] === code);
+  if (!match) {
+    login.fails++;
+    if (limit && login.fails >= LOCK_AFTER) {
+      login.fails = 0; login.lockedUntil = now + LOCK_SECONDS;
+      return { ok: false, locked: true, text: `Wrong code · locked for ${LOCK_SECONDS} s` };
+    }
+    return { ok: false, text: limit ? `Wrong code · ${LOCK_AFTER - login.fails} tries left` : "Wrong code" };
+  }
+  const step = state.serverCounter + match[1];
+  if (step <= login.lastUsedStep) return { ok: false, text: "Refused · that code has already been used" };
+  login.lastUsedStep = step; login.fails = 0;
+  return { ok: true, text: `Logged in · matched the ${match[0]} step` };
+}
+
+function showLogin(res, what) {
+  const st = $("login-status");
+  st.textContent = res.text;
+  st.className = "pill " + (res.ok ? "ok" : "bad");
+  const li = document.createElement("li");
+  const time = new Date().toLocaleTimeString("en-GB", { hour12: false });
+  li.textContent = `${time} · ${what} · ${res.text}`;
+  li.className = res.ok ? "ok" : "bad";
+  const log = $("login-log");
+  log.prepend(li);
+  while (log.children.length > 6) log.lastChild.remove();
+}
+
+function tryLogin() {
+  const code = $("login-code").value.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(code)) { showLogin({ ok: false, text: "A code is 6 digits" }, "—"); return; }
+  showLogin(serverCheck(code), group3(code));
+}
+// Only digits and spaces can be typed into the box
+$("login-code").addEventListener("input", (e) => { e.target.value = e.target.value.replace(/[^\d ]/g, ""); });
+$("login-code").addEventListener("keydown", (e) => { if (e.key === "Enter") tryLogin(); });
+$("login-go").addEventListener("click", tryLogin);
+$("rl").addEventListener("change", () => { login.fails = 0; login.lockedUntil = 0; $("bf-out").textContent = ""; });
+$("login-fill").addEventListener("click", () => { if (state.phone) $("login-code").value = state.phone.code; });
+
+// Random six-digit guesses from the secure random source. (Using % on a
+// 32-bit number makes a few codes very slightly likelier. That's harmless
+// for a guessing demo.)
+function* randomGuesses(count) {
+  const buf = new Uint32Array(16384);
+  for (let done = 0; done < count; ) {
+    crypto.getRandomValues(buf);
+    for (let i = 0; i < buf.length && done < count; i++, done++) yield buf[i] % 1000000;
+  }
+}
+
+$("bf-run").addEventListener("click", () => {
+  if (!state.server) return;
+  const out = $("bf-out");
+  const expected = 1000000 / 3; // average guesses needed when 3 codes are accepted
+  if ($("rl").checked) {
+    let tries = 0, last = null;
+    for (const g of randomGuesses(1000)) {
+      last = serverCheck(String(g).padStart(6, "0"));
+      if (last.locked && tries === 0 && !last.text.startsWith("Wrong")) break; // already locked before we started
+      tries++;
+      if (last.ok || last.locked) break;
+    }
+    if (last && last.ok) { showLogin(last, "random guess"); out.textContent = "A random guess got in. That's a 3 in 1,000,000 chance, so this is very lucky."; return; }
+    showLogin(last, tries ? `${tries} random guesses` : "random guesses");
+    const days = (expected / LOCK_AFTER) * LOCK_SECONDS / 86400;
+    out.textContent = `${tries ? `${tries} wrong guesses, then` : "Still"} locked. At ${LOCK_AFTER} guesses every ${LOCK_SECONDS} seconds, an attacker would need about ${Math.round(days)} days on average to get one right. Real services lock for longer and warn you. The lock also refuses the right code, so try logging in above.`;
+  } else {
+    const t0 = performance.now(), want = new Set([state.server.prev, state.server.now, state.server.next].map(Number));
+    let hits = 0;
+    for (const g of randomGuesses(1000000)) if (want.has(g)) hits++;
+    const ms = Math.round(performance.now() - t0);
+    out.textContent = `Tried 1,000,000 random guesses in ${ms} ms, and ${hits} would have logged in. A bot making 1,000 guesses a second would get in after about ${Math.round(expected / 1000 / 60)} minutes on average. That's why the rate limit matters.`;
+  }
+});
+
+// ---------- HOTP: a button-press counter instead of the clock ----------
+// The token and the server each keep a count. The server accepts the next
+// H_WINDOW counters and moves its count past any code it accepts.
+const H_WINDOW = 3;
+const hs = { key: T.randomSecret(), token: 0, server: 0, shown: null, gen: 0 };
+
+async function renderHotp() {
+  if (state.noCrypto) return;
+  const gen = ++hs.gen;
+  const win = await Promise.all(Array.from({ length: H_WINDOW }, (_, i) => T.hotp(hs.key, hs.server + i)));
+  if (gen !== hs.gen) return;
+  $("h-tok").textContent = String(hs.token);
+  $("h-code").textContent = hs.shown ? group3(hs.shown.code) : "--- ---";
+  const list = $("h-win");
+  list.replaceChildren();
+  for (const r of win) {
+    const li = document.createElement("li");
+    li.textContent = `counter ${r.counter} · ${group3(r.code)}`;
+    if (hs.shown && r.code === hs.shown.code) li.className = "match";
+    list.append(li);
+  }
+}
+function hotpStatus(ok, text) { const p = $("h-status"); p.textContent = text; p.className = "pill " + (ok ? "ok" : "bad"); }
+
+$("h-press").addEventListener("click", async () => {
+  if (state.noCrypto) return;
+  const r = await T.hotp(hs.key, hs.token);
+  hs.shown = { counter: hs.token, code: r.code };
+  hs.token++;
+  const ahead = hs.shown.counter - hs.server;
+  hotpStatus(ahead < H_WINDOW, ahead < H_WINDOW ? `Token used counter ${hs.shown.counter} · inside the server's window` : `Token used counter ${hs.shown.counter} · past the server's window`);
+  renderHotp();
+});
+$("h-login").addEventListener("click", async () => {
+  if (state.noCrypto) return;
+  if (!hs.shown) { hotpStatus(false, "Press the button first"); return; }
+  const win = await Promise.all(Array.from({ length: H_WINDOW }, (_, i) => T.hotp(hs.key, hs.server + i)));
+  const hit = win.find((r) => r.code === hs.shown.code);
+  if (hit) { hs.server = hit.counter + 1; hotpStatus(true, `Logged in · server moved its count to ${hs.server}`); }
+  else if (hs.shown.counter < hs.server) hotpStatus(false, "Refused · that code has already been used");
+  else hotpStatus(false, `Rejected · the token is ${hs.shown.counter - hs.server + 1} presses ahead, outside the window of ${H_WINDOW}`);
+  renderHotp();
+});
+$("h-reset").addEventListener("click", () => {
+  hs.server = hs.token; hs.shown = null;
+  hotpStatus(true, `Resynced · both counters at ${hs.token}`);
+  renderHotp();
+});
+
+// ---------- Phishing walkthrough ----------
+// Each step says which boxes and arrows light up and what they say.
+// Tones: "bad" = the attacker wins this step, "ok" = the attack is stopped.
+const liveCode = () => group3(state.server ? state.server.now : "123456");
+const PHISH = {
+  code: [
+    () => ({ text: "An email says there's a problem with your account. Its link opens bank-login.example, a copy of your bank's login page.", you: ["opened the link"], fake: ["looks like your bank"], a1: ["opens page →"] }),
+    () => ({ text: `You type your password, then the code from your app: ${liveCode()}.`, you: ["typed password and code"], fake: ["records both"], a1: [`password + ${liveCode()} →`] }),
+    () => ({ text: "Within seconds, the fake site types them into the real bank.example.", fake: ["passes them on"], real: ["checks the code"], a1: [`password + ${liveCode()} →`], a2: [`password + ${liveCode()} →`] }),
+    () => ({ text: "The code is less than 30 seconds old, so it's valid. The real site can't tell who typed it.", fake: ["waiting"], real: ["code accepted", "bad"], a2: ["← logged-in session", "bad"] }),
+    () => ({ text: "The attacker is logged in as you. The code proved someone had it, but you gave it to the wrong site.", you: ["sees an error page"], fake: ["logged in as you", "bad"], real: ["code accepted", "bad"], a2: ["← logged-in session", "bad"] }),
+  ],
+  key: [
+    () => ({ text: "The same email, the same link, the same copy of your bank's page at bank-login.example.", you: ["opened the link"], fake: ["looks like your bank"], a1: ["opens page →"] }),
+    () => ({ text: "The fake page asks your browser to sign in with a passkey.", you: ["browser checks the address"], fake: ["asks for a passkey"], a1: ["← sign in with a passkey?"] }),
+    () => ({ text: "Your passkey was made for bank.example, and the browser only offers it on that exact site. This is bank-login.example, so there's nothing to offer. You can't hand it over by mistake.", you: ["no passkey for this site", "ok"], fake: ["gets nothing"], a1: ["✕ nothing sent", "ok"] }),
+    () => ({ text: "Copying the real bank's sign-in request doesn't help either. The browser only signs for the site it's really on and writes that address into the answer, so the bank would refuse it.", fake: ["tries the real bank"], real: ["wrong website name", "ok"], a2: ["✕ refused", "ok"] }),
+    () => ({ text: "The attacker has nothing to use. Passkeys and security keys (FIDO2) resist phishing because the browser checks the address, not you.", you: ["safe", "ok"], fake: ["got nothing", "ok"], real: ["never saw a login", "ok"] }),
+  ],
+};
+const ph = { mode: "code", step: 0, timer: 0 };
+
+function renderPhish() {
+  const steps = PHISH[ph.mode];
+  const cur = steps[ph.step]();
+  for (const [k, id] of [["you", "n-you"], ["fake", "n-fake"], ["real", "n-real"]]) {
+    const v = cur[k];
+    $(id).className = "node" + (v ? " on" : "") + (v && v[1] ? " " + v[1] : "");
+    $("nn-" + k).textContent = v ? v[0] : "";
+  }
+  for (const n of ["1", "2"]) {
+    const v = cur["a" + n];
+    $("a-" + n).className = "arrow" + (v ? " on" : "") + (v && v[1] ? " " + v[1] : "");
+    $("al-" + n).textContent = v ? v[0] : "";
+  }
+  const list = $("ph-steps");
+  list.replaceChildren();
+  steps.forEach((f, i) => {
+    const li = document.createElement("li");
+    li.textContent = f().text;
+    li.className = i === ph.step ? "now" : i > ph.step ? "later" : "";
+    list.append(li);
+  });
+  $("ph-count").textContent = `Step ${ph.step + 1} of ${steps.length}`;
+  $("ph-prev").disabled = ph.step === 0;
+  $("ph-next").disabled = ph.step === steps.length - 1;
+  $("ph-play").textContent = ph.timer ? "Pause" : ph.step === steps.length - 1 ? "Play again" : "Play";
+}
+function stopPlay() { clearInterval(ph.timer); ph.timer = 0; }
+function setMode(m) {
+  stopPlay(); ph.mode = m; ph.step = 0;
+  $("ph-code").setAttribute("aria-pressed", String(m === "code"));
+  $("ph-key").setAttribute("aria-pressed", String(m === "key"));
+  renderPhish();
+}
+$("ph-code").addEventListener("click", () => setMode("code"));
+$("ph-key").addEventListener("click", () => setMode("key"));
+$("ph-prev").addEventListener("click", () => { stopPlay(); ph.step = Math.max(0, ph.step - 1); renderPhish(); });
+$("ph-next").addEventListener("click", () => { stopPlay(); ph.step = Math.min(PHISH[ph.mode].length - 1, ph.step + 1); renderPhish(); });
+$("ph-play").addEventListener("click", () => {
+  if (ph.timer) { stopPlay(); renderPhish(); return; }
+  if (ph.step === PHISH[ph.mode].length - 1) ph.step = 0;
+  ph.timer = setInterval(() => {
+    if (ph.step < PHISH[ph.mode].length - 1) ph.step++;
+    if (ph.step === PHISH[ph.mode].length - 1) stopPlay();
+    renderPhish();
+  }, 2800);
+  renderPhish();
+});
+
+explainSkew();
+renderPhish();
+renderHotp();
+if (state.noCrypto) for (const id of ["login-go", "login-fill", "bf-run", "h-press", "h-login", "h-reset"]) $(id).disabled = true;
 
 // ---------- 3D ----------
 let THREE = null;

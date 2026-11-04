@@ -85,13 +85,18 @@ export function truncate(hmac, digits = 6) {
   return { offset, binary, code };
 }
 
-// All five steps together. Returns every intermediate value so the page
-// can show its working.
-export async function totp(keyBytes, unixSeconds, { period = 30, digits = 6 } = {}) {
-  const counter = timeToCounter(unixSeconds, period);
+// HOTP (RFC 4226): steps 3 to 5 for any counter. The older button-press
+// tokens use this directly, adding one to the counter per press.
+// Returns every intermediate value so the page can show its working.
+export async function hotp(keyBytes, counter, { digits = 6 } = {}) {
   const message = counterBytes(counter);
   const hmac = await hmacSha1(keyBytes, message);
   return { counter, message, hmac, ...truncate(hmac, digits) };
+}
+
+// TOTP (RFC 6238) is HOTP with the counter taken from the clock (step 2).
+export async function totp(keyBytes, unixSeconds, { period = 30, digits = 6 } = {}) {
+  return hotp(keyBytes, timeToCounter(unixSeconds, period), { digits });
 }
 
 // Official test values from RFC 6238, Appendix B (SHA-1 rows).
@@ -105,6 +110,10 @@ export const RFC6238_SHA1 = [
   [2000000000, "69279037"],
   [20000000000, "65353130"],
 ];
+
+// Official test values from RFC 4226, Appendix D: HOTP codes for
+// counters 0 to 9, using the same seed.
+export const RFC4226_HOTP = ["755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583", "399871", "520489"];
 
 export async function rfcSelfTest() {
   const key = new TextEncoder().encode(RFC6238_SEED);
