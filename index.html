@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Security: this page may only load scripts and styles from its own site. No inline code, no network
+     connections, no forms, no plugins. See "How this page protects you" and README.md. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="How six-digit authenticator codes work without internet: a 3D model and a live, step-by-step TOTP calculation you can check against RFC 6238.">
+<title>Offline Code Lab</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Two-factor codes · TOTP · RFC 6238</span>
+    <h1>Offline Code Lab</h1>
+    <p class="lede">Authenticator apps (like Google Authenticator) make a new six-digit code every 30 seconds, even in aeroplane mode. Nothing is sent to your phone. Your phone and the website each hold the same secret and read the same clock, so they can each work out the same number on their own.</p>
+  </header>
+
+  <section class="hero" aria-label="3D model of a phone and a server making the same code">
+    <div class="stage-col">
+      <div class="stage" id="stage">
+        <canvas id="scene" tabindex="0" aria-label="3D model: a demo phone and a demo server, with no connection between them, showing the same code. Drag or use arrow keys to rotate, click a part to learn about it."></canvas>
+        <div class="labels" id="labels" aria-hidden="true"></div>
+        <div class="stage-tools"><button type="button" id="reset-view">Reset view</button></div>
+        <div class="fallback" id="fallback" hidden></div>
+      </div>
+      <div class="controls">
+        <div class="ctl-row">
+          <label for="skew">Phone clock is off by</label>
+          <input type="range" id="skew" min="-120" max="120" step="5" value="0">
+          <output id="skew-out" for="skew">0 s</output>
+        </div>
+        <div class="ctl-row">
+          <button type="button" id="new-secret">New demo secret</button>
+          <label class="check"><input type="checkbox" id="pause"> Pause the clock</label>
+          <span id="verdict" class="pill ok" role="status">Accepted</span>
+        </div>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div class="codes">
+        <div class="code-box">
+          <span class="eyebrow">Demo phone shows</span>
+          <span class="code" id="c-phone">--- ---</span>
+        </div>
+        <div class="code-box">
+          <span class="eyebrow">Demo server expects</span>
+          <span class="code" id="c-server">--- ---</span>
+        </div>
+        <div class="timebar" aria-hidden="true"><span id="timebar-fill"></span></div>
+        <p class="small" id="c-left">New code in 30 s</p>
+      </div>
+      <div class="box card" id="card">
+        <span class="eyebrow">Selected</span>
+        <h2 id="card-title"></h2>
+        <p id="card-body"></p>
+        <p id="card-tip" class="small"></p>
+      </div>
+      <div class="chips" id="chips" aria-label="Parts of the model"></div>
+    </aside>
+  </section>
+
+  <section class="pipeline" aria-labelledby="pipe-h">
+    <div class="sec-head">
+      <h2 id="pipe-h">Follow one code through the maths</h2>
+      <p class="small">These are the demo phone's real values, recalculated live every 30 seconds. Pause the clock to read them.</p>
+    </div>
+    <p id="crypto-missing" class="warn" hidden>This browser didn't provide the Web Crypto API, so the codes can't be calculated. It's only available on https:// or localhost pages, not files opened from disk.</p>
+    <ol class="steps">
+      <li class="step">
+        <span class="step-n">1</span>
+        <div class="step-body">
+          <h3>The shared secret</h3>
+          <p>At setup, the website makes a random 160-bit secret and shows it to you once, inside a QR code. Your app saves it. It's written in Base32, letters A–Z and digits 2–7.</p>
+          <dl class="vals">
+            <dt>Base32</dt><dd><code id="p-b32"></code></dd>
+            <dt>As bytes (hex)</dt><dd><code id="p-key"></code></dd>
+          </dl>
+        </div>
+      </li>
+      <li class="step">
+        <span class="step-n">2</span>
+        <div class="step-body">
+          <h3>Turn the time into a counter</h3>
+          <p>Take Unix time, the seconds since 1 January 1970 in UTC, so time zones don't matter. Divide by 30 and round down. Every 30 seconds the counter goes up by one.</p>
+          <dl class="vals">
+            <dt>Unix time</dt><dd><code id="p-unix"></code></dd>
+            <dt>÷ 30, rounded down</dt><dd><code id="p-counter"></code></dd>
+            <dt>As 8 bytes</dt><dd><code id="p-msg"></code></dd>
+          </dl>
+        </div>
+      </li>
+      <li class="step">
+        <span class="step-n">3</span>
+        <div class="step-body">
+          <h3>Mix them with HMAC-SHA1</h3>
+          <p>HMAC is a keyed fingerprint. With the secret as the key, the counter becomes 20 bytes that look random. Without the secret, nobody can predict them, and you can't work backwards from a code to the secret.</p>
+          <div class="hexgrid" id="p-hmac" aria-label="HMAC output, 20 bytes"></div>
+          <p class="small legend"><span class="sw sw-off"></span> last byte: its final 4 bits pick a position · <span class="sw sw-pick"></span> the 4 bytes read from there</p>
+        </div>
+      </li>
+      <li class="step">
+        <span class="step-n">4</span>
+        <div class="step-body">
+          <h3>Cut it down: dynamic truncation</h3>
+          <p>The last 4 bits of the HMAC give a number from 0 to 15. Read 4 bytes starting at that position, then clear the very first bit so the number can never be negative.</p>
+          <dl class="vals">
+            <dt>Position</dt><dd><code id="p-offset"></code></dd>
+            <dt>4 bytes read</dt><dd><code id="p-four"></code></dd>
+            <dt>First bit cleared</dt><dd><code id="p-bin"></code></dd>
+          </dl>
+        </div>
+      </li>
+      <li class="step">
+        <span class="step-n">5</span>
+        <div class="step-body">
+          <h3>Keep the last six digits</h3>
+          <p>Divide by 1,000,000 and keep the remainder, adding leading zeros if needed. That's the code on the screen.</p>
+          <dl class="vals">
+            <dt>Remainder</dt><dd><code id="p-mod"></code></dd>
+          </dl>
+          <span class="code big" id="p-code">--- ---</span>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section class="twocol">
+    <div class="box">
+      <h2>Proof it's the real algorithm</h2>
+      <p>RFC 6238, the TOTP standard, prints test values. This page runs its own code against them in your browser. The RFC uses 8-digit codes. Six-digit apps keep the last six.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Unix time</th><th scope="col">RFC says</th><th scope="col">This page</th><th scope="col">Result</th></tr></thead>
+          <tbody id="rfc-rows"></tbody>
+        </table>
+      </div>
+      <div><button type="button" id="rfc-run">Run the check again</button></div>
+    </div>
+    <div class="box">
+      <h2>What the QR code holds</h2>
+      <p>The setup QR code is just text. This is the one the demo secret would make:</p>
+      <pre class="uri"><code id="uri"></code></pre>
+      <dl class="params">
+        <dt><code>totp</code></dt><dd>Time-based codes. <code>hotp</code> would use a press counter instead.</dd>
+        <dt>Label</dt><dd>The service and account name your app shows.</dd>
+        <dt><code>secret</code></dt><dd>The shared secret. Anyone who sees it can make your codes forever.</dd>
+        <dt><code>algorithm</code>, <code>digits</code>, <code>period</code></dt><dd>SHA1, 6 and 30 are the defaults almost every service uses.</dd>
+      </dl>
+      <p class="warn">Never paste a real 2FA secret or setup QR code into any website, this one included. This page has no box for one on purpose.</p>
+    </div>
+  </section>
+
+  <article>
+    <section>
+      <h2>What these codes protect against</h2>
+      <ul>
+        <li>A stolen or reused password on its own. The attacker also needs a code made in the last 30 seconds or so.</li>
+        <li>Codes intercepted in transit. None are sent to you, so there's no text message to redirect and nothing for a SIM swap to capture.</li>
+        <li>Replay. A careful server accepts each time step only once, so a code that's already been used is dead.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>What they don't protect against</h2>
+      <ul>
+        <li><b>Real-time phishing.</b> A fake login page can pass your code to the real site within seconds. Passkeys and security keys (FIDO2) stop this because they check the website's address.</li>
+        <li><b>Leaked secrets.</b> A screenshot of the QR code, a database breach or malware on the phone gives away codes forever. If your app backs up to the cloud, protect that account well.</li>
+        <li><b>Losing the phone.</b> Keep the backup codes the site gives you somewhere safe and offline.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>If you run the server</h2>
+      <ul>
+        <li>Accept only the current step plus or minus one, and refuse a step that has already been used.</li>
+        <li>Rate-limit attempts. Six digits is only a million combinations.</li>
+        <li>Store secrets encrypted, compare codes in constant time, and use a well-tested library.</li>
+        <li>Offer passkeys as well, for phishing resistance.</li>
+      </ul>
+    </section>
+    <section id="security">
+      <h2>How this page protects you</h2>
+      <!--security-start-->
+      <ul>
+        <li>The page loads nothing from other websites. Its one library, three.js <code>0.170.0</code>, is copied into the project. The GitHub advisory database shows no known vulnerabilities for this version.</li>
+        <li>A Content Security Policy only lets the browser run scripts and styles from this site. Inline code, network connections, forms and plugins are all blocked.</li>
+        <li>Demo secrets come from <code>crypto.getRandomValues</code>, a cryptographically secure source. They stay in memory only and disappear when you close the tab.</li>
+        <li>HMAC runs in the browser's built-in Web Crypto API. The page doesn't implement its own SHA-1.</li>
+        <li>No trackers, cookies, storage or input boxes. Text is written with <code>textContent</code>, never <code>innerHTML</code> or <code>eval</code>.</li>
+        <li>GitHub Pages can't send security headers, so the page can't stop other sites from framing it. There's no login or real data on it, so there's nothing to steal that way.</li>
+      </ul>
+      <!--security-end-->
+    </section>
+  </article>
+  <footer>Offline Code Lab · an educational demo of TOTP (RFC 6238) · not affiliated with any authenticator app · built with three.js (MIT licence)</footer>
+</div>
+</body>
+</html>
