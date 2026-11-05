@@ -9,6 +9,7 @@
 <meta name="referrer" content="no-referrer">
 <meta name="description" content="How six-digit authenticator codes work without internet: a 3D model and a live, step-by-step TOTP calculation you can check against RFC 6238.">
 <title>Offline Code Lab</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 <script type="module" src="app.js"></script>
 </head>
@@ -34,6 +35,7 @@
           <input type="range" id="skew" min="-120" max="120" step="5" value="0">
           <output id="skew-out" for="skew">0 s</output>
         </div>
+        <p class="small" id="skew-why" aria-live="polite"></p>
         <div class="ctl-row">
           <button type="button" id="new-secret">New demo secret</button>
           <label class="check"><input type="checkbox" id="pause"> Pause the clock</label>
@@ -63,6 +65,29 @@
       </div>
       <div class="chips" id="chips" aria-label="Parts of the model"></div>
     </aside>
+  </section>
+
+  <section class="box tryit" aria-labelledby="try-h">
+    <div class="qr-col">
+      <canvas id="qr" class="qr" role="img" aria-label="QR code holding the demo secret, for scanning with an authenticator app"></canvas>
+      <p class="small">Shows up in your app as <b>Offline Code Lab (learner)</b></p>
+    </div>
+    <div class="try-body">
+      <span class="eyebrow">Try it with your real app</span>
+      <h2 id="try-h">Scan this, then turn the internet off</h2>
+      <ol class="try-steps">
+        <li>In Google Authenticator, or any authenticator app, add a code by scanning this QR code.</li>
+        <li>Your app now shows the same six digits as the box below, changing at the same moment.</li>
+        <li>Turn on aeroplane mode. The codes keep matching, because nothing is being sent.</li>
+        <li>Delete the Offline Code Lab entry from your app when you're done.</li>
+      </ol>
+      <p class="small">Codes not matching? This demo uses your computer's clock as the website's clock, so both devices need the right time. Check that your phone and this computer both set their date and time automatically. Being more than about 30 seconds apart is enough to break it.</p>
+      <div class="code-box">
+        <span class="eyebrow">Your app should show</span>
+        <span class="code big" id="try-code">--- ---</span>
+      </div>
+      <p class="warn small">This is a throwaway demo secret, made in your browser just now. It protects nothing. If you click New demo secret, the QR code changes and the entry in your app stops matching.</p>
+    </div>
   </section>
 
   <section class="pipeline" aria-labelledby="pipe-h">
@@ -131,6 +156,53 @@
   </section>
 
   <section class="twocol">
+    <div class="box" aria-labelledby="login-h">
+      <span class="eyebrow">Replay and guessing</span>
+      <h2 id="login-h">Log in to the demo server</h2>
+      <p>A careful server checks three things: the code matches the current 30-second step or one either side, that step hasn't already been used, and you haven't had too many wrong tries.</p>
+      <div class="ctl-row">
+        <label for="login-code">Code</label>
+        <input id="login-code" class="codein" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="7" placeholder="6 digits">
+        <button type="button" id="login-go">Log in</button>
+        <button type="button" id="login-fill">Use the demo phone's code</button>
+      </div>
+      <p><span id="login-status" class="pill" role="status">Not logged in</span></p>
+      <p class="small">Try logging in twice with the same code. The second time is refused, so a code someone watched you type is already useless.</p>
+      <ol class="log" id="login-log" aria-label="Login attempts"></ol>
+
+      <h3>Can someone just guess?</h3>
+      <p>Six digits is 1,000,000 possibilities, and the server accepts 3 of them at any moment, so each random guess has a 3 in 1,000,000 chance. Without a limit, a computer gets there fast.</p>
+      <div class="ctl-row">
+        <label class="check"><input type="checkbox" id="rl" checked> Rate limit: lock for 60 s after 5 wrong codes</label>
+        <button type="button" id="bf-run">Guess at random</button>
+      </div>
+      <p id="bf-out" class="small" aria-live="polite"></p>
+    </div>
+
+    <div class="box" aria-labelledby="hotp-h">
+      <span class="eyebrow">HOTP vs TOTP</span>
+      <h2 id="hotp-h">The older version counts button presses</h2>
+      <p>HOTP (RFC 4226) runs the same steps 3 to 5, but the counter in step 2 goes up by one each time you press a button on the token, not every 30 seconds. The server keeps its own count and looks up to 3 presses ahead.</p>
+      <div class="hotp-grid">
+        <div class="hotp-card">
+          <span class="eyebrow">Button token</span>
+          <span class="code" id="h-code">--- ---</span>
+          <span class="small">Presses so far: <b id="h-tok">0</b></span>
+          <button type="button" id="h-press">Press for a code</button>
+        </div>
+        <div class="hotp-card">
+          <span class="eyebrow">Server accepts counters</span>
+          <ol class="hotp-win" id="h-win" aria-label="Codes the server will accept"></ol>
+          <button type="button" id="h-login">Log in with the token's code</button>
+        </div>
+      </div>
+      <p><span id="h-status" class="pill" role="status">Press the button to make a code</span></p>
+      <p class="small">Press 4 or more times without logging in and the token runs ahead of the server's window. Every code is then rejected until someone resyncs the two. TOTP doesn't drift like this, because both sides read the clock instead of counting.</p>
+      <div><button type="button" id="h-reset">Resync both counters</button></div>
+    </div>
+  </section>
+
+  <section class="twocol">
     <div class="box">
       <h2>Proof it's the real algorithm</h2>
       <p>RFC 6238, the TOTP standard, prints test values. This page runs its own code against them in your browser. The RFC uses 8-digit codes. Six-digit apps keep the last six.</p>
@@ -153,6 +225,29 @@
         <dt><code>algorithm</code>, <code>digits</code>, <code>period</code></dt><dd>SHA1, 6 and 30 are the defaults almost every service uses.</dd>
       </dl>
       <p class="warn">Never paste a real 2FA secret or setup QR code into any website, this one included. This page has no box for one on purpose.</p>
+    </div>
+  </section>
+
+  <section class="box phish" aria-labelledby="phish-h">
+    <span class="eyebrow">Real-time phishing</span>
+    <h2 id="phish-h">Why a fake site can still use your code, and can't use a passkey</h2>
+    <div class="ctl-row" role="group" aria-label="Choose a sign-in method">
+      <button type="button" id="ph-code" aria-pressed="true">With a six-digit code</button>
+      <button type="button" id="ph-key" aria-pressed="false">With a passkey</button>
+    </div>
+    <div class="phish-map" aria-hidden="true">
+      <div class="node" id="n-you"><span class="eyebrow">You</span><b>Your browser</b><span class="node-note" id="nn-you"></span></div>
+      <div class="arrow" id="a-1"><span class="arrow-label" id="al-1"></span><span class="arrow-line"></span></div>
+      <div class="node" id="n-fake"><span class="eyebrow">Attacker</span><b>bank-login.example</b><span class="node-note" id="nn-fake"></span></div>
+      <div class="arrow" id="a-2"><span class="arrow-label" id="al-2"></span><span class="arrow-line"></span></div>
+      <div class="node" id="n-real"><span class="eyebrow">Real site</span><b>bank.example</b><span class="node-note" id="nn-real"></span></div>
+    </div>
+    <ol class="phish-steps" id="ph-steps"></ol>
+    <div class="ctl-row">
+      <button type="button" id="ph-prev">Back</button>
+      <button type="button" id="ph-next">Next step</button>
+      <button type="button" id="ph-play">Play</button>
+      <span class="small" id="ph-count" aria-live="polite"></span>
     </div>
   </section>
 
@@ -186,17 +281,17 @@
       <h2>How this page protects you</h2>
       <!--security-start-->
       <ul>
-        <li>The page loads nothing from other websites. Its one library, three.js <code>0.170.0</code>, is copied into the project. The GitHub advisory database shows no known vulnerabilities for this version.</li>
+        <li>The page loads nothing from other websites. Its two libraries, three.js <code>0.170.0</code> and qrcode-generator <code>2.0.4</code>, are copied into the project unchanged. The GitHub advisory database shows no known vulnerabilities for either version.</li>
         <li>A Content Security Policy only lets the browser run scripts and styles from this site. Inline code, network connections, forms and plugins are all blocked.</li>
         <li>Demo secrets come from <code>crypto.getRandomValues</code>, a cryptographically secure source. They stay in memory only and disappear when you close the tab.</li>
         <li>HMAC runs in the browser's built-in Web Crypto API. The page doesn't implement its own SHA-1.</li>
-        <li>No trackers, cookies, storage or input boxes. Text is written with <code>textContent</code>, never <code>innerHTML</code> or <code>eval</code>.</li>
+        <li>No trackers, cookies or storage. The only text box takes a six-digit demo code and nothing else. There's nowhere to enter a secret. Text is written with <code>textContent</code>, never <code>innerHTML</code> or <code>eval</code>.</li>
         <li>GitHub Pages can't send security headers, so the page can't stop other sites from framing it. There's no login or real data on it, so there's nothing to steal that way.</li>
       </ul>
       <!--security-end-->
     </section>
   </article>
-  <footer>Offline Code Lab · an educational demo of TOTP (RFC 6238) · not affiliated with any authenticator app · built with three.js (MIT licence)</footer>
+  <footer>Offline Code Lab · an educational demo of TOTP (RFC 6238) · not affiliated with any authenticator app · built with three.js and qrcode-generator (both MIT licence)</footer>
 </div>
 </body>
 </html>
